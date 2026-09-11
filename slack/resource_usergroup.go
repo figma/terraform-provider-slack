@@ -79,28 +79,61 @@ func resourceSlackUserGroupCreate(ctx context.Context, d *schema.ResourceData, m
 	}
 	createdUserGroup, err := client.CreateUserGroupContext(ctx, userGroup)
 	if err != nil {
-		if err.Error() != "name_already_exists" && err.Error() != "handle_already_exists" {
+		var (
+			group          slack.UserGroup
+			collisionField string
+			collisionValue string
+		)
+		switch err.Error() {
+		case "name_already_exists":
+			group, err = findUserGroupByName(ctx, d, m, name, true)
+			collisionField = "name"
+			collisionValue = name
+		case "handle_already_exists":
+			group, err = findUserGroupByHandle(ctx, d, m, handle, true)
+			collisionField = "handle"
+			collisionValue = handle
+		default:
 			return diag.Errorf("could not create usergroup %s: %s", name, err)
 		}
-		group, err := findUserGroupByName(ctx, d, m, name, true)
 		if err != nil {
-			return diag.Errorf("could not find usergroup %s: %s", name, err)
+			return diag.Errorf("could not find existing usergroup for %s: %s", name, err)
 		}
+		if group.DateDelete == 0 {
+			return diag.Errorf(
+				"could not create usergroup %s: %s %s is already used by active usergroup %s (%s)",
+				name,
+				collisionField,
+				collisionValue,
+				group.Name,
+				group.ID,
+			)
+		}
+
+		d.SetId(group.ID)
 		_, err = client.EnableUserGroupContext(ctx, group.ID)
 		if err != nil {
-			if err.Error() != "already_enabled" {
-				return diag.Errorf("could not enable usergroup %s (%s): %s", name, group.ID, err)
+			if err.Error() == "already_enabled" {
+				d.SetId("")
+				return diag.Errorf("could not restore usergroup %s (%s): usergroup became active before it could be restored", name, group.ID)
+			}
+			return diag.Errorf("could not enable usergroup %s (%s): %s", name, group.ID, err)
+		}
+
+		if users.Len() > 0 {
+			_, err = client.UpdateUserGroupMembersContext(ctx, group.ID, strings.Join(schemaSetToSlice(users), ","))
+			if err != nil {
+				return rollbackRestoredUserGroup(ctx, d, client, fmt.Errorf("could not update restored usergroup members %s (%s): %w", name, group.ID, err))
 			}
 		}
-		_, err = client.UpdateUserGroupContext(ctx, group.ID)
+		_, err = client.UpdateUserGroupContext(ctx, group.ID, userGroupUpdateOptions(name, description, handle, channels)...)
 		if err != nil {
-			return diag.Errorf("could not update usergroup %s (%s): %s", name, group.ID, err)
+			return rollbackRestoredUserGroup(ctx, d, client, fmt.Errorf("could not update restored usergroup %s (%s): %w", name, group.ID, err))
 		}
-		d.SetId(group.ID)
-	} else {
-		d.SetId(createdUserGroup.ID)
+		return resourceSlackUserGroupRead(ctx, d, m)
 	}
 
+	d.SetId(createdUserGroup.ID)
 	if users.Len() > 0 {
 		_, err := client.UpdateUserGroupMembersContext(ctx, d.Id(), strings.Join(schemaSetToSlice(users), ","))
 		if err != nil {
@@ -109,6 +142,20 @@ func resourceSlackUserGroupCreate(ctx context.Context, d *schema.ResourceData, m
 		schemaSetToSlice(users)
 	}
 	return resourceSlackUserGroupRead(ctx, d, m)
+}
+
+func rollbackRestoredUserGroup(
+	ctx context.Context,
+	d *schema.ResourceData,
+	client *slack.Client,
+	restoreErr error,
+) diag.Diagnostics {
+	_, disableErr := client.DisableUserGroupContext(ctx, d.Id())
+	if disableErr == nil || disableErr.Error() == "already_disabled" {
+		d.SetId("")
+		return diag.FromErr(restoreErr)
+	}
+	return diag.Errorf("%s; could not disable usergroup %s again: %s", restoreErr, d.Id(), disableErr)
 }
 
 func resourceSlackUserGroupRead(
@@ -183,6 +230,41 @@ func findUserGroupByID(
 	return slack.UserGroup{}, fmt.Errorf("could not find usergroup %s", id)
 }
 
+func findUserGroupByHandle(
+	ctx context.Context,
+	d *schema.ResourceData,
+	m interface{},
+	handle string,
+	includeDisabled bool,
+) (slack.UserGroup, error) {
+	userGroups, err := ListUserGroupsWithContext(ctx, d, m, includeDisabled)
+	if err != nil {
+		return slack.UserGroup{}, err
+	}
+
+	for _, userGroup := range userGroups {
+		if userGroup.Handle == handle {
+			return userGroup, nil
+		}
+	}
+
+	return slack.UserGroup{}, fmt.Errorf("could not find usergroup with handle %s", handle)
+}
+
+func userGroupUpdateOptions(
+	name string,
+	description string,
+	handle string,
+	channels *schema.Set,
+) []slack.UpdateUserGroupsOption {
+	return []slack.UpdateUserGroupsOption{
+		slack.UpdateUserGroupsOptionName(name),
+		slack.UpdateUserGroupsOptionChannels(schemaSetToSlice(channels)),
+		slack.UpdateUserGroupsOptionDescription(&description),
+		slack.UpdateUserGroupsOptionHandle(handle),
+	}
+}
+
 func resourceSlackUserGroupUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*slack.Client)
 
@@ -193,13 +275,7 @@ func resourceSlackUserGroupUpdate(ctx context.Context, d *schema.ResourceData, m
 	channels := d.Get("channels").(*schema.Set)
 	users := d.Get("users").(*schema.Set)
 
-	updateUserGroupOptions := []slack.UpdateUserGroupsOption{
-		slack.UpdateUserGroupsOptionName(name),
-		slack.UpdateUserGroupsOptionChannels(schemaSetToSlice(channels)),
-		slack.UpdateUserGroupsOptionDescription(&description),
-		slack.UpdateUserGroupsOptionHandle(handle),
-	}
-	_, err := client.UpdateUserGroupContext(ctx, id, updateUserGroupOptions...)
+	_, err := client.UpdateUserGroupContext(ctx, id, userGroupUpdateOptions(name, description, handle, channels)...)
 	if err != nil {
 		return diag.Errorf("could not update usergroup %s: %s", name, err)
 	}
@@ -220,7 +296,7 @@ func resourceSlackUserGroupDelete(ctx context.Context, d *schema.ResourceData, m
 
 	id := d.Id()
 	_, err := client.DisableUserGroupContext(ctx, id)
-	if err != nil {
+	if err != nil && err.Error() != "already_disabled" {
 		return diag.FromErr(err)
 	}
 
