@@ -24,6 +24,14 @@ import (
 )
 
 const (
+	testUserGroupsCreatePath  = "/usergroups.create"
+	testUserGroupsEnablePath  = "/usergroups.enable"
+	testUserGroupsListPath    = "/usergroups.list"
+	testUserGroupsMembersPath = "/usergroups.users.update"
+	testUserGroupsUpdatePath  = "/usergroups.update"
+)
+
+const (
 	userGroupResourceNamePrefix = "test-acc-slack-usergroup-test"
 )
 
@@ -45,7 +53,7 @@ func init() {
 				if strings.HasPrefix(group.Name, userGroupResourceNamePrefix) {
 					_, err := c.DisableUserGroupContext(context.Background(), group.ID)
 					if err != nil {
-						if err.Error() != "already_disabled" {
+						if err.Error() != slackErrorAlreadyDisabled {
 							sweeperErr := fmt.Errorf("disabling usergroup %s during sweep: %s", group.Name, err)
 							log.Printf("[ERROR] %s", sweeperErr)
 							sweeperErrs = multierror.Append(sweeperErrs, err)
@@ -116,9 +124,9 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByHandle(t *testing.T)
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/usergroups.create":
+		case testUserGroupsCreatePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
-		case "/usergroups.list":
+		case testUserGroupsListPath:
 			assert.Equal(t, "true", r.Form.Get("include_disabled"))
 			name := "Deprecated - Platform incident subscribers"
 			dateDelete := int64(1720000000)
@@ -138,11 +146,11 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByHandle(t *testing.T)
 					"prefs":       map[string]interface{}{"channels": desiredChannels},
 				}},
 			})
-		case "/usergroups.enable":
+		case testUserGroupsEnablePath:
 			assert.Equal(t, groupID, r.Form.Get("usergroup"))
 			enabled.Store(true)
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
-		case "/usergroups.update":
+		case testUserGroupsUpdatePath:
 			assert.True(t, enabled.Load(), "usergroup must be enabled before it is updated")
 			assert.Equal(t, groupID, r.Form.Get("usergroup"))
 			assert.Equal(t, desiredName, r.Form.Get("name"))
@@ -151,7 +159,7 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByHandle(t *testing.T)
 			assert.ElementsMatch(t, desiredChannels, strings.Split(r.Form.Get("channels"), ","))
 			updated.Store(true)
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
-		case "/usergroups.users.update":
+		case testUserGroupsMembersPath:
 			t.Error("members should be preserved when users is empty")
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_members_update"})
 		default:
@@ -194,9 +202,9 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByName(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/usergroups.create":
+		case testUserGroupsCreatePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "name_already_exists"})
-		case "/usergroups.list":
+		case testUserGroupsListPath:
 			assert.Equal(t, "true", r.Form.Get("include_disabled"))
 			handle := "deprecated-platform-incident-subscribers"
 			dateDelete := int64(1720000000)
@@ -216,14 +224,14 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByName(t *testing.T) {
 					"users":       users,
 				}},
 			})
-		case "/usergroups.enable":
+		case testUserGroupsEnablePath:
 			enabled.Store(true)
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
-		case "/usergroups.update":
+		case testUserGroupsUpdatePath:
 			assert.True(t, membersUpdated.Load(), "members must be updated before usergroup properties")
 			updated.Store(true)
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
-		case "/usergroups.users.update":
+		case testUserGroupsMembersPath:
 			assert.True(t, enabled.Load(), "usergroup must be enabled before members are updated")
 			assert.Equal(t, desiredUser, r.Form.Get("users"))
 			membersUpdated.Store(true)
@@ -286,9 +294,9 @@ func TestResourceSlackUserGroupCreateRefusesActiveCollision(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 
 				switch r.URL.Path {
-				case "/usergroups.create":
+				case testUserGroupsCreatePath:
 					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": test.collisionError})
-				case "/usergroups.list":
+				case testUserGroupsListPath:
 					assert.Equal(t, "true", r.Form.Get("include_disabled"))
 					writeSlackTestResponse(t, w, map[string]interface{}{
 						"ok": true,
@@ -333,9 +341,9 @@ func TestResourceSlackUserGroupCreateRollsBackWhenUpdateFails(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/usergroups.create":
+		case testUserGroupsCreatePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
-		case "/usergroups.list":
+		case testUserGroupsListPath:
 			assert.Equal(t, "true", r.Form.Get("include_disabled"))
 			writeSlackTestResponse(t, w, map[string]interface{}{
 				"ok": true,
@@ -346,9 +354,9 @@ func TestResourceSlackUserGroupCreateRollsBackWhenUpdateFails(t *testing.T) {
 					"date_delete": 1720000000,
 				}},
 			})
-		case "/usergroups.update":
+		case testUserGroupsUpdatePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "internal_error"})
-		case "/usergroups.enable":
+		case testUserGroupsEnablePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
 		case "/usergroups.disable":
 			assert.Equal(t, groupID, r.Form.Get("usergroup"))
@@ -387,9 +395,9 @@ func TestResourceSlackUserGroupCreateRollsBackWhenMemberUpdateFails(t *testing.T
 		w.Header().Set("Content-Type", "application/json")
 
 		switch r.URL.Path {
-		case "/usergroups.create":
+		case testUserGroupsCreatePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
-		case "/usergroups.list":
+		case testUserGroupsListPath:
 			writeSlackTestResponse(t, w, map[string]interface{}{
 				"ok": true,
 				"usergroups": []map[string]interface{}{{
@@ -399,9 +407,9 @@ func TestResourceSlackUserGroupCreateRollsBackWhenMemberUpdateFails(t *testing.T
 					"date_delete": 1720000000,
 				}},
 			})
-		case "/usergroups.enable":
+		case testUserGroupsEnablePath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
-		case "/usergroups.users.update":
+		case testUserGroupsMembersPath:
 			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "invalid_users"})
 		case "/usergroups.disable":
 			disabled.Store(true)
@@ -448,7 +456,7 @@ func TestRollbackRestoredUserGroupKeepsIDWhenDisableFails(t *testing.T) {
 func TestRollbackRestoredUserGroupClearsIDWhenAlreadyDisabled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/usergroups.disable", r.URL.Path)
-		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "already_disabled"})
+		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": slackErrorAlreadyDisabled})
 	}))
 	t.Cleanup(server.Close)
 
@@ -481,9 +489,9 @@ func TestResourceSlackUserGroupCreateHandlesRestoreEnableFailure(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 
 				switch r.URL.Path {
-				case "/usergroups.create":
+				case testUserGroupsCreatePath:
 					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
-				case "/usergroups.list":
+				case testUserGroupsListPath:
 					writeSlackTestResponse(t, w, map[string]interface{}{
 						"ok": true,
 						"usergroups": []map[string]interface{}{{
@@ -493,7 +501,7 @@ func TestResourceSlackUserGroupCreateHandlesRestoreEnableFailure(t *testing.T) {
 							"date_delete": 1720000000,
 						}},
 					})
-				case "/usergroups.enable":
+				case testUserGroupsEnablePath:
 					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": test.enableError})
 				default:
 					t.Errorf("usergroup must not be updated after enable fails: %s", r.URL.Path)
@@ -521,7 +529,7 @@ func TestResourceSlackUserGroupDeleteAcceptsAlreadyDisabled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.NoError(t, r.ParseForm())
 		assert.Equal(t, "/usergroups.disable", r.URL.Path)
-		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "already_disabled"})
+		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": slackErrorAlreadyDisabled})
 	}))
 	t.Cleanup(server.Close)
 
@@ -679,7 +687,7 @@ func testAccCheckUserGroupDestroy(s *terraform.State) error {
 		}
 
 		_, err := c.DisableUserGroupContext(context.Background(), rs.Primary.ID)
-		if err != nil && err.Error() != "already_disabled" {
+		if err != nil && err.Error() != slackErrorAlreadyDisabled {
 			return fmt.Errorf("error disabling usergroup %s: %s", rs.Primary.ID, err)
 		}
 	}

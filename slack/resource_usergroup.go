@@ -11,6 +11,8 @@ import (
 	"github.com/slack-go/slack"
 )
 
+const slackErrorAlreadyDisabled = "already_disabled"
+
 func resourceSlackUserGroup() *schema.Resource {
 	return &schema.Resource{
 		ReadContext:   resourceSlackUserGroupRead,
@@ -151,7 +153,7 @@ func rollbackRestoredUserGroup(
 	restoreErr error,
 ) diag.Diagnostics {
 	_, disableErr := client.DisableUserGroupContext(ctx, d.Id())
-	if disableErr == nil || disableErr.Error() == "already_disabled" {
+	if disableErr == nil || disableErr.Error() == slackErrorAlreadyDisabled {
 		d.SetId("")
 		return diag.FromErr(restoreErr)
 	}
@@ -296,7 +298,7 @@ func resourceSlackUserGroupDelete(ctx context.Context, d *schema.ResourceData, m
 
 	id := d.Id()
 	_, err := client.DisableUserGroupContext(ctx, id)
-	if err != nil && err.Error() != "already_disabled" {
+	if err != nil && err.Error() != slackErrorAlreadyDisabled {
 		return diag.FromErr(err)
 	}
 
