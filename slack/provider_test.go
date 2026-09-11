@@ -65,6 +65,9 @@ func TestProvider_impl(_ *testing.T) {
 }
 
 func testAccPreCheck(t *testing.T) {
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("Acceptance tests skipped unless env 'TF_ACC' set")
+	}
 	if v := os.Getenv("SLACK_TOKEN"); v == "" {
 		t.Fatal("SLACK_TOKEN must be set for acceptance tests")
 	}

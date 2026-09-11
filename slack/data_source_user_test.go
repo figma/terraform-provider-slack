@@ -11,6 +11,8 @@ import (
 )
 
 func TestAccSlackUserDataSource_basic(t *testing.T) {
+	testAccPreCheck(t)
+
 	t.Parallel()
 	dataSourceName := "data.slack_user.test"
 

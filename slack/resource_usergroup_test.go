@@ -69,6 +69,8 @@ func init() {
 }
 
 func TestAccSlackUserGroupTest(t *testing.T) {
+	testAccPreCheck(t)
+
 	t.Parallel()
 
 	resourceName := "slack_usergroup.test"
