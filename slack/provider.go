@@ -8,6 +8,11 @@ import (
 	"github.com/slack-go/slack"
 )
 
+type providerClient struct {
+	*slack.Client
+	userGroups userGroupCache
+}
+
 // Provider returns a *schema.Provider
 func Provider() *schema.Provider {
 	return &schema.Provider{
@@ -43,7 +48,7 @@ func providerConfigure(_ context.Context, d *schema.ResourceData) (interface{}, 
 		return nil, diag.Errorf("could not create slack client. Please provide a token.")
 	}
 	slackClient := slack.New(token.(string))
-	return slackClient, diags
+	return &providerClient{Client: slackClient}, diags
 }
 
 func schemaSetToSlice(set *schema.Set) []string {

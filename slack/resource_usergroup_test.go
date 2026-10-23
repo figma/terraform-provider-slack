@@ -227,7 +227,7 @@ func testAccSlackUserGroupWithUsers(name string, channels, users []string) slack
 }
 
 func testAccCheckUserGroupDestroy(s *terraform.State) error {
-	c := testAccProvider.Meta().(*slack.Client)
+	c := testAccProvider.Meta().(*providerClient)
 	for _, rs := range s.RootModule().Resources {
 		if rs.Type != "slack_usergroup" {
 			continue

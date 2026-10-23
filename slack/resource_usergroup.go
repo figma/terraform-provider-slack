@@ -61,7 +61,7 @@ func resourceSlackUserGroup() *schema.Resource {
 }
 
 func resourceSlackUserGroupCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	client := m.(*slack.Client)
+	client := m.(*providerClient)
 
 	name := d.Get("name").(string)
 	description := d.Get("description").(string)
@@ -184,7 +184,7 @@ func findUserGroupByID(
 }
 
 func resourceSlackUserGroupUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	client := m.(*slack.Client)
+	client := m.(*providerClient)
 
 	id := d.Id()
 	name := d.Get("name").(string)
@@ -216,7 +216,7 @@ func resourceSlackUserGroupUpdate(ctx context.Context, d *schema.ResourceData, m
 
 func resourceSlackUserGroupDelete(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	var diags diag.Diagnostics
-	client := m.(*slack.Client)
+	client := m.(*providerClient)
 
 	id := d.Id()
 	_, err := client.DisableUserGroupContext(ctx, id)
