@@ -15,11 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	trueString               = "true"
+	userGroupsUpdateEndpoint = "usergroups.update"
+)
+
 func TestUserGroupRefreshCache(t *testing.T) {
 	var requests, renamed int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&requests, 1)
-		if r.URL.Path != "/usergroups.list" || r.FormValue("include_users") != "true" {
+		if r.URL.Path != "/usergroups.list" || r.FormValue("include_users") != trueString {
 			t.Errorf("unexpected request: %s %s", r.URL.Path, r.Form)
 		}
 		name := "Active"
@@ -27,7 +32,7 @@ func TestUserGroupRefreshCache(t *testing.T) {
 			name = "Renamed"
 		}
 		groups := fmt.Sprintf(`{"id":"S1","name":%q,"handle":"active","users":["U1"],"prefs":{"channels":["C1"]}}`, name)
-		if r.FormValue("include_disabled") == "true" {
+		if r.FormValue("include_disabled") == trueString {
 			groups += `,{"id":"S2","name":"Disabled","handle":"disabled","date_delete":1}`
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -98,7 +103,7 @@ func TestUserGroupCacheInvalidation(t *testing.T) {
 		{"usergroups.enable", func(c *providerClient) (slack.UserGroup, error) {
 			return c.EnableUserGroupContext(context.Background(), "S1")
 		}},
-		{"usergroups.update", func(c *providerClient) (slack.UserGroup, error) {
+		{userGroupsUpdateEndpoint, func(c *providerClient) (slack.UserGroup, error) {
 			return c.UpdateUserGroupContext(context.Background(), "S1", slack.UpdateUserGroupsOptionName("Renamed"))
 		}},
 		{"usergroups.users.update", func(c *providerClient) (slack.UserGroup, error) {
@@ -118,7 +123,7 @@ func TestUserGroupCacheInvalidation(t *testing.T) {
 				before = []slack.UserGroup{stable}
 			case "usergroups.enable":
 				before[0].DateDelete = 1
-			case "usergroups.update":
+			case userGroupsUpdateEndpoint:
 				after[0].Name = "Renamed"
 			case "usergroups.users.update":
 				after[0].Users = []string{"U2"}
@@ -133,7 +138,7 @@ func TestUserGroupCacheInvalidation(t *testing.T) {
 						t.Errorf("unexpected mutation: %s", r.URL.Path)
 					}
 					atomic.StoreInt32(&mutated, 1)
-					if test.endpoint == "usergroups.update" {
+					if test.endpoint == userGroupsUpdateEndpoint {
 						_, _ = fmt.Fprint(w, `{"ok":false,"error":"internal_error"}`)
 						return
 					}
@@ -147,7 +152,7 @@ func TestUserGroupCacheInvalidation(t *testing.T) {
 				}
 				visible := []slack.UserGroup{}
 				for _, group := range groups {
-					if r.FormValue("include_disabled") == "true" || group.DateDelete == 0 {
+					if r.FormValue("include_disabled") == trueString || group.DateDelete == 0 {
 						visible = append(visible, group)
 					}
 				}
@@ -161,7 +166,7 @@ func TestUserGroupCacheInvalidation(t *testing.T) {
 				require.NoError(t, err)
 			}
 			_, err := test.mutate(client)
-			if test.endpoint == "usergroups.update" {
+			if test.endpoint == userGroupsUpdateEndpoint {
 				require.Error(t, err, "a failed response can follow a remote mutation")
 			} else {
 				require.NoError(t, err)
