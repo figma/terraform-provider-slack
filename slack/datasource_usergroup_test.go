@@ -13,6 +13,8 @@ import (
 )
 
 func TestAccSlackUserGroupDataSource_basic(t *testing.T) {
+	testAccPreCheck(t)
+
 	resourceName := "slack_usergroup.test"
 	dataSourceName := "data.slack_usergroup.test"
 

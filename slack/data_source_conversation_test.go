@@ -13,6 +13,8 @@ import (
 )
 
 func TestAccSlackConversationDataSource_basic(t *testing.T) {
+	testAccPreCheck(t)
+
 	var providers []*schema.Provider
 
 	nameByID := acctest.RandomWithPrefix("test-acc-slack-conversation-test")

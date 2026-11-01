@@ -2,11 +2,15 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hashicorp/go-multierror"
@@ -15,7 +19,16 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/terraform"
 	"github.com/slack-go/slack"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	testUserGroupsCreatePath  = "/usergroups.create"
+	testUserGroupsEnablePath  = "/usergroups.enable"
+	testUserGroupsListPath    = "/usergroups.list"
+	testUserGroupsMembersPath = "/usergroups.users.update"
+	testUserGroupsUpdatePath  = "/usergroups.update"
 )
 
 const (
@@ -40,7 +53,7 @@ func init() {
 				if strings.HasPrefix(group.Name, userGroupResourceNamePrefix) {
 					_, err := c.DisableUserGroupContext(context.Background(), group.ID)
 					if err != nil {
-						if err.Error() != "already_disabled" {
+						if err.Error() != slackErrorAlreadyDisabled {
 							sweeperErr := fmt.Errorf("disabling usergroup %s during sweep: %s", group.Name, err)
 							log.Printf("[ERROR] %s", sweeperErr)
 							sweeperErrs = multierror.Append(sweeperErrs, err)
@@ -56,6 +69,8 @@ func init() {
 }
 
 func TestAccSlackUserGroupTest(t *testing.T) {
+	testAccPreCheck(t)
+
 	t.Parallel()
 
 	resourceName := "slack_usergroup.test"
@@ -91,6 +106,446 @@ func TestAccSlackUserGroupTest(t *testing.T) {
 
 		testSlackUserGroupUpdate(t, resourceName, createUserGroup, &updateUserGroup)
 	})
+}
+
+func TestResourceSlackUserGroupCreateRestoresDisabledGroupByHandle(t *testing.T) {
+	const (
+		groupID       = "S123"
+		desiredName   = "Platform incident subscribers"
+		desiredHandle = "platform-incident-subscribers"
+	)
+
+	desiredDescription := "Users to auto-invite to incident channels for team Platform"
+	desiredChannels := []string{"C123", "C456"}
+	existingUsers := []string{"U123", "U456"}
+	var enabled atomic.Bool
+	var updated atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case testUserGroupsCreatePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
+		case testUserGroupsListPath:
+			assert.Equal(t, "true", r.Form.Get("include_disabled"))
+			name := "Deprecated - Platform incident subscribers"
+			dateDelete := int64(1720000000)
+			if updated.Load() {
+				name = desiredName
+				dateDelete = 0
+			}
+			writeSlackTestResponse(t, w, map[string]interface{}{
+				"ok": true,
+				"usergroups": []map[string]interface{}{{
+					"id":          groupID,
+					"name":        name,
+					"handle":      desiredHandle,
+					"description": desiredDescription,
+					"date_delete": dateDelete,
+					"users":       existingUsers,
+					"prefs":       map[string]interface{}{"channels": desiredChannels},
+				}},
+			})
+		case testUserGroupsEnablePath:
+			assert.Equal(t, groupID, r.Form.Get("usergroup"))
+			enabled.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		case testUserGroupsUpdatePath:
+			assert.True(t, enabled.Load(), "usergroup must be enabled before it is updated")
+			assert.Equal(t, groupID, r.Form.Get("usergroup"))
+			assert.Equal(t, desiredName, r.Form.Get("name"))
+			assert.Equal(t, desiredHandle, r.Form.Get("handle"))
+			assert.Equal(t, desiredDescription, r.Form.Get("description"))
+			assert.ElementsMatch(t, desiredChannels, strings.Split(r.Form.Get("channels"), ","))
+			updated.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		case testUserGroupsMembersPath:
+			t.Error("members should be preserved when users is empty")
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_members_update"})
+		default:
+			t.Errorf("unexpected Slack API request: %s", r.URL.Path)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_request"})
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	resource := resourceSlackUserGroup()
+	d := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
+		"name":        desiredName,
+		"handle":      desiredHandle,
+		"description": desiredDescription,
+		"channels":    []interface{}{desiredChannels[0], desiredChannels[1]},
+		"users":       []interface{}{},
+	})
+	client := testUserGroupClient(t, server)
+
+	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
+	require.False(t, diagnostics.HasError(), diagnostics)
+	require.Equal(t, groupID, d.Id())
+	require.True(t, enabled.Load())
+	require.ElementsMatch(t, existingUsers, d.Get("users").(*schema.Set).List())
+}
+
+func TestResourceSlackUserGroupCreateRestoresDisabledGroupByName(t *testing.T) {
+	const (
+		groupID       = "S123"
+		desiredName   = "Platform incident subscribers"
+		desiredHandle = "platform-incident-subscribers"
+		desiredUser   = "U123"
+	)
+
+	var enabled atomic.Bool
+	var membersUpdated atomic.Bool
+	var updated atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case testUserGroupsCreatePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "name_already_exists"})
+		case testUserGroupsListPath:
+			assert.Equal(t, "true", r.Form.Get("include_disabled"))
+			handle := "deprecated-platform-incident-subscribers"
+			dateDelete := int64(1720000000)
+			users := []string{}
+			if updated.Load() {
+				handle = desiredHandle
+				dateDelete = 0
+				users = []string{desiredUser}
+			}
+			writeSlackTestResponse(t, w, map[string]interface{}{
+				"ok": true,
+				"usergroups": []map[string]interface{}{{
+					"id":          groupID,
+					"name":        desiredName,
+					"handle":      handle,
+					"date_delete": dateDelete,
+					"users":       users,
+				}},
+			})
+		case testUserGroupsEnablePath:
+			enabled.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		case testUserGroupsUpdatePath:
+			assert.True(t, membersUpdated.Load(), "members must be updated before usergroup properties")
+			updated.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		case testUserGroupsMembersPath:
+			assert.True(t, enabled.Load(), "usergroup must be enabled before members are updated")
+			assert.Equal(t, desiredUser, r.Form.Get("users"))
+			membersUpdated.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		default:
+			t.Errorf("unexpected Slack API request: %s", r.URL.Path)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_request"})
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	resource := resourceSlackUserGroup()
+	d := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
+		"name":   desiredName,
+		"handle": desiredHandle,
+		"users":  []interface{}{desiredUser},
+	})
+	client := testUserGroupClient(t, server)
+
+	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
+	require.False(t, diagnostics.HasError(), diagnostics)
+	require.Equal(t, groupID, d.Id())
+	require.True(t, enabled.Load())
+	require.Equal(t, desiredHandle, d.Get("handle"))
+}
+
+func TestResourceSlackUserGroupCreateRefusesActiveCollision(t *testing.T) {
+	const (
+		desiredName   = "Platform incident subscribers"
+		desiredHandle = "platform-incident-subscribers"
+	)
+
+	tests := []struct {
+		name               string
+		collisionError     string
+		existingName       string
+		existingHandle     string
+		expectedDiagnostic string
+	}{
+		{
+			name:               "handle",
+			collisionError:     "handle_already_exists",
+			existingName:       "Another team",
+			existingHandle:     desiredHandle,
+			expectedDiagnostic: "handle platform-incident-subscribers is already used by active usergroup Another team (SACTIVE)",
+		},
+		{
+			name:               "name",
+			collisionError:     "name_already_exists",
+			existingName:       desiredName,
+			existingHandle:     "another-handle",
+			expectedDiagnostic: "name Platform incident subscribers is already used by active usergroup Platform incident subscribers (SACTIVE)",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.NoError(t, r.ParseForm())
+				w.Header().Set("Content-Type", "application/json")
+
+				switch r.URL.Path {
+				case testUserGroupsCreatePath:
+					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": test.collisionError})
+				case testUserGroupsListPath:
+					assert.Equal(t, "true", r.Form.Get("include_disabled"))
+					writeSlackTestResponse(t, w, map[string]interface{}{
+						"ok": true,
+						"usergroups": []map[string]interface{}{{
+							"id":          "SACTIVE",
+							"name":        test.existingName,
+							"handle":      test.existingHandle,
+							"date_delete": 0,
+						}},
+					})
+				default:
+					t.Errorf("active usergroup must not be modified: %s", r.URL.Path)
+					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_mutation"})
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			resource := resourceSlackUserGroup()
+			d := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
+				"name":   desiredName,
+				"handle": desiredHandle,
+			})
+			client := testUserGroupClient(t, server)
+
+			diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
+			require.True(t, diagnostics.HasError())
+			require.Contains(t, diagnostics[0].Summary, test.expectedDiagnostic)
+			require.Empty(t, d.Id())
+		})
+	}
+}
+
+func TestResourceSlackUserGroupCreateRollsBackWhenUpdateFails(t *testing.T) {
+	const (
+		groupID = "S123"
+		handle  = "platform-incident-subscribers"
+	)
+
+	var disabled atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case testUserGroupsCreatePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
+		case testUserGroupsListPath:
+			assert.Equal(t, "true", r.Form.Get("include_disabled"))
+			writeSlackTestResponse(t, w, map[string]interface{}{
+				"ok": true,
+				"usergroups": []map[string]interface{}{{
+					"id":          groupID,
+					"name":        "Deprecated - Platform incident subscribers",
+					"handle":      handle,
+					"date_delete": 1720000000,
+				}},
+			})
+		case testUserGroupsUpdatePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "internal_error"})
+		case testUserGroupsEnablePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		case "/usergroups.disable":
+			assert.Equal(t, groupID, r.Form.Get("usergroup"))
+			disabled.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		default:
+			t.Errorf("unexpected Slack API request: %s", r.URL.Path)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_request"})
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	resource := resourceSlackUserGroup()
+	d := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
+		"name":   "Platform incident subscribers",
+		"handle": handle,
+	})
+	client := testUserGroupClient(t, server)
+
+	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
+	require.True(t, diagnostics.HasError())
+	require.Contains(t, diagnostics[0].Summary, "could not update restored usergroup")
+	require.True(t, disabled.Load())
+	require.Empty(t, d.Id())
+}
+
+func TestResourceSlackUserGroupCreateRollsBackWhenMemberUpdateFails(t *testing.T) {
+	const (
+		groupID = "S123"
+		handle  = "platform-incident-subscribers"
+	)
+
+	var disabled atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case testUserGroupsCreatePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
+		case testUserGroupsListPath:
+			writeSlackTestResponse(t, w, map[string]interface{}{
+				"ok": true,
+				"usergroups": []map[string]interface{}{{
+					"id":          groupID,
+					"name":        "Deprecated - Platform incident subscribers",
+					"handle":      handle,
+					"date_delete": 1720000000,
+				}},
+			})
+		case testUserGroupsEnablePath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		case testUserGroupsMembersPath:
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "invalid_users"})
+		case "/usergroups.disable":
+			disabled.Store(true)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": true, "usergroup": map[string]interface{}{"id": groupID}})
+		default:
+			t.Errorf("unexpected Slack API request: %s", r.URL.Path)
+			writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_request"})
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	resource := resourceSlackUserGroup()
+	d := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
+		"name":   "Platform incident subscribers",
+		"handle": handle,
+		"users":  []interface{}{"U123"},
+	})
+	client := testUserGroupClient(t, server)
+
+	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
+	require.True(t, diagnostics.HasError())
+	require.Contains(t, diagnostics[0].Summary, "could not update restored usergroup members")
+	require.True(t, disabled.Load())
+	require.Empty(t, d.Id())
+}
+
+func TestRollbackRestoredUserGroupKeepsIDWhenDisableFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/usergroups.disable", r.URL.Path)
+		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "internal_error"})
+	}))
+	t.Cleanup(server.Close)
+
+	d := resourceSlackUserGroup().TestResourceData()
+	d.SetId("S123")
+	client := testUserGroupClient(t, server)
+
+	diagnostics := rollbackRestoredUserGroup(context.Background(), d, client, fmt.Errorf("update failed"))
+	require.True(t, diagnostics.HasError())
+	require.Contains(t, diagnostics[0].Summary, "update failed; could not disable usergroup S123 again: internal_error")
+	require.Equal(t, "S123", d.Id())
+}
+
+func TestRollbackRestoredUserGroupClearsIDWhenAlreadyDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/usergroups.disable", r.URL.Path)
+		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": slackErrorAlreadyDisabled})
+	}))
+	t.Cleanup(server.Close)
+
+	d := resourceSlackUserGroup().TestResourceData()
+	d.SetId("S123")
+	client := testUserGroupClient(t, server)
+
+	diagnostics := rollbackRestoredUserGroup(context.Background(), d, client, fmt.Errorf("update failed"))
+	require.True(t, diagnostics.HasError())
+	require.Contains(t, diagnostics[0].Summary, "update failed")
+	require.Empty(t, d.Id())
+}
+
+func TestResourceSlackUserGroupCreateHandlesRestoreEnableFailure(t *testing.T) {
+	const handle = "platform-incident-subscribers"
+
+	tests := []struct {
+		enableError        string
+		expectedDiagnostic string
+		expectedID         string
+	}{
+		{enableError: "internal_error", expectedDiagnostic: "could not enable usergroup", expectedID: "S123"},
+		{enableError: "already_enabled", expectedDiagnostic: "usergroup became active before it could be restored", expectedID: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.enableError, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.NoError(t, r.ParseForm())
+				w.Header().Set("Content-Type", "application/json")
+
+				switch r.URL.Path {
+				case testUserGroupsCreatePath:
+					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "handle_already_exists"})
+				case testUserGroupsListPath:
+					writeSlackTestResponse(t, w, map[string]interface{}{
+						"ok": true,
+						"usergroups": []map[string]interface{}{{
+							"id":          "S123",
+							"name":        "Deprecated - Platform incident subscribers",
+							"handle":      handle,
+							"date_delete": 1720000000,
+						}},
+					})
+				case testUserGroupsEnablePath:
+					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": test.enableError})
+				default:
+					t.Errorf("usergroup must not be updated after enable fails: %s", r.URL.Path)
+					writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": "unexpected_request"})
+				}
+			}))
+			t.Cleanup(server.Close)
+
+			resource := resourceSlackUserGroup()
+			d := schema.TestResourceDataRaw(t, resource.Schema, map[string]interface{}{
+				"name":   "Platform incident subscribers",
+				"handle": handle,
+			})
+			client := testUserGroupClient(t, server)
+
+			diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
+			require.True(t, diagnostics.HasError())
+			require.Contains(t, diagnostics[0].Summary, test.expectedDiagnostic)
+			require.Equal(t, test.expectedID, d.Id())
+		})
+	}
+}
+
+func TestResourceSlackUserGroupDeleteAcceptsAlreadyDisabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.NoError(t, r.ParseForm())
+		assert.Equal(t, "/usergroups.disable", r.URL.Path)
+		writeSlackTestResponse(t, w, map[string]interface{}{"ok": false, "error": slackErrorAlreadyDisabled})
+	}))
+	t.Cleanup(server.Close)
+
+	d := resourceSlackUserGroup().TestResourceData()
+	d.SetId("S123")
+	client := testUserGroupClient(t, server)
+
+	diagnostics := resourceSlackUserGroupDelete(context.Background(), d, client)
+	require.False(t, diagnostics.HasError(), diagnostics)
+}
+
+func writeSlackTestResponse(t *testing.T, w http.ResponseWriter, response interface{}) {
+	t.Helper()
+	assert.NoError(t, json.NewEncoder(w).Encode(response))
 }
 
 func createTestConversation(t *testing.T) *slack.Channel {
@@ -234,7 +689,7 @@ func testAccCheckUserGroupDestroy(s *terraform.State) error {
 		}
 
 		_, err := c.DisableUserGroupContext(context.Background(), rs.Primary.ID)
-		if err != nil && err.Error() != "already_disabled" {
+		if err != nil && err.Error() != slackErrorAlreadyDisabled {
 			return fmt.Errorf("error disabling usergroup %s: %s", rs.Primary.ID, err)
 		}
 	}
