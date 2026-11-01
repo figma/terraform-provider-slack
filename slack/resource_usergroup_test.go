@@ -179,7 +179,7 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByHandle(t *testing.T)
 		"channels":    []interface{}{desiredChannels[0], desiredChannels[1]},
 		"users":       []interface{}{},
 	})
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
 	require.False(t, diagnostics.HasError(), diagnostics)
@@ -251,7 +251,7 @@ func TestResourceSlackUserGroupCreateRestoresDisabledGroupByName(t *testing.T) {
 		"handle": desiredHandle,
 		"users":  []interface{}{desiredUser},
 	})
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
 	require.False(t, diagnostics.HasError(), diagnostics)
@@ -321,7 +321,7 @@ func TestResourceSlackUserGroupCreateRefusesActiveCollision(t *testing.T) {
 				"name":   desiredName,
 				"handle": desiredHandle,
 			})
-			client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+			client := testUserGroupClient(t, server)
 
 			diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
 			require.True(t, diagnostics.HasError())
@@ -376,7 +376,7 @@ func TestResourceSlackUserGroupCreateRollsBackWhenUpdateFails(t *testing.T) {
 		"name":   "Platform incident subscribers",
 		"handle": handle,
 	})
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
 	require.True(t, diagnostics.HasError())
@@ -429,7 +429,7 @@ func TestResourceSlackUserGroupCreateRollsBackWhenMemberUpdateFails(t *testing.T
 		"handle": handle,
 		"users":  []interface{}{"U123"},
 	})
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
 	require.True(t, diagnostics.HasError())
@@ -447,7 +447,7 @@ func TestRollbackRestoredUserGroupKeepsIDWhenDisableFails(t *testing.T) {
 
 	d := resourceSlackUserGroup().TestResourceData()
 	d.SetId("S123")
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := rollbackRestoredUserGroup(context.Background(), d, client, fmt.Errorf("update failed"))
 	require.True(t, diagnostics.HasError())
@@ -464,7 +464,7 @@ func TestRollbackRestoredUserGroupClearsIDWhenAlreadyDisabled(t *testing.T) {
 
 	d := resourceSlackUserGroup().TestResourceData()
 	d.SetId("S123")
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := rollbackRestoredUserGroup(context.Background(), d, client, fmt.Errorf("update failed"))
 	require.True(t, diagnostics.HasError())
@@ -517,7 +517,7 @@ func TestResourceSlackUserGroupCreateHandlesRestoreEnableFailure(t *testing.T) {
 				"name":   "Platform incident subscribers",
 				"handle": handle,
 			})
-			client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+			client := testUserGroupClient(t, server)
 
 			diagnostics := resourceSlackUserGroupCreate(context.Background(), d, client)
 			require.True(t, diagnostics.HasError())
@@ -537,7 +537,7 @@ func TestResourceSlackUserGroupDeleteAcceptsAlreadyDisabled(t *testing.T) {
 
 	d := resourceSlackUserGroup().TestResourceData()
 	d.SetId("S123")
-	client := slack.New("testing-token", slack.OptionAPIURL(server.URL+"/"))
+	client := testUserGroupClient(t, server)
 
 	diagnostics := resourceSlackUserGroupDelete(context.Background(), d, client)
 	require.False(t, diagnostics.HasError(), diagnostics)
@@ -682,7 +682,7 @@ func testAccSlackUserGroupWithUsers(name string, channels, users []string) slack
 }
 
 func testAccCheckUserGroupDestroy(s *terraform.State) error {
-	c := testAccProvider.Meta().(*slack.Client)
+	c := testAccProvider.Meta().(*providerClient)
 	for _, rs := range s.RootModule().Resources {
 		if rs.Type != "slack_usergroup" {
 			continue
